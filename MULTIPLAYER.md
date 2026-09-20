@@ -32,6 +32,10 @@ Code: [source/funkin/multiplayer/](source/funkin/multiplayer/). The engine itsel
 `PlayState` (countdown handoff, remote hits/misses, no pause/death during matches), `StrumLine` (`remote` strumlines, key-change signal), `FreeplayState` (`goBack` hook) and `MainMenuState` (the menu entry).
 Scripts can react to the opponent's misses with `onDadMiss` / `onPostDadMiss` (their hits already trigger `onDadHit`).
 
+## Mods that hide arrows
+
+Some mods hide one side's arrows (usually the left/opponent side). In a match that would hide the arrows of whoever plays that side, so the game moves the hiding to the **opponent's** side instead: if a mod hides the left arrows and you play left, your arrows stay visible and the right side is hidden; if you play right, the left side is hidden as the mod intended. This only changes what is drawn, so the mod's own scripts are unaffected. It catches arrows hidden through the strumline's visibility or by fading the strums/notes to zero alpha; other hiding tricks in a mod's scripts may not be covered.
+
 ## Known limitations
 
 - The opponent's animations are delayed by their network latency (usually tens of milliseconds). Your own gameplay is never affected.

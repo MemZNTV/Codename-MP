@@ -106,6 +106,7 @@ class MultiplayerMatch {
 	 * arrive afterwards, like the opponent's last hits, are then ignored instead of touching a dead state.
 	 */
 	static function detach():Void {
+		swapped = false;
 		if (local != null) {
 			local.onHit.remove(onLocalHit);
 			local.onMiss.remove(onLocalMiss);
@@ -380,6 +381,61 @@ class MultiplayerMatch {
 			strum.updatePlayerInput(pressed[i], justPressed[i], justReleased[i]);
 			justPressed[i] = justReleased[i] = false;
 		}
+	}
+
+	// ------------------------------------------------------------ hidden arrows
+
+	static var swapped:Bool = false;
+	static var savedLocalVisible:Bool = true;
+	static var savedRemoteVisible:Bool = true;
+	static var savedStrumAlpha:Array<Float> = [];
+	static var savedNotes:Array<{note:Note, alpha:Float}> = [];
+
+	/** A strumline counts as hidden by the mod if it's invisible or all of its arrows are faded out. */
+	static function hiddenByMod(sl:StrumLine):Bool {
+		if (!sl.visible) return true;
+		if (sl.members.length == 0) return false;
+		for (s in sl.members) if (s != null && s.alpha >= 0.05) return false;
+		return true;
+	}
+
+	/**
+	 * Some mods hide one side's arrows (usually the left/opponent side). In a match that could be YOUR side,
+	 * leaving you with no arrows. So when the mod hides the local player's side but not the opponent's, we
+	 * show ours and hide the opponent's instead, only while drawing. The mod's scripts never see the change.
+	 * Called from `PlayState.draw`, before the frame is drawn.
+	 */
+	public static function beforeDraw(p:PlayState):Void {
+		swapped = false;
+		if (p != ps || local == null || remote == null) return;
+		if (!hiddenByMod(local) || hiddenByMod(remote)) return;
+
+		swapped = true;
+		savedLocalVisible = local.visible;
+		savedRemoteVisible = remote.visible;
+		savedStrumAlpha = [for (s in local.members) s == null ? 1.0 : s.alpha];
+		savedNotes = [];
+
+		local.visible = true;
+		for (s in local.members) if (s != null && s.alpha < 0.05) s.alpha = 1;
+		local.notes.forEach(function(n:Note) {
+			savedNotes.push({note: n, alpha: n.alpha});
+			if (n.alpha < 0.05) n.alpha = n.isSustainNote ? 0.6 : 1; // sustains are drawn see-through
+		});
+		remote.visible = false;
+	}
+
+	/** Puts everything `beforeDraw` touched back exactly as the mod had it. */
+	public static function afterDraw():Void {
+		if (!swapped) return;
+		swapped = false;
+		if (local != null) {
+			local.visible = savedLocalVisible;
+			for (i => s in local.members) if (s != null && i < savedStrumAlpha.length) s.alpha = savedStrumAlpha[i];
+		}
+		if (remote != null) remote.visible = savedRemoteVisible;
+		for (n in savedNotes) if (n.note != null && n.note.exists) n.note.alpha = n.alpha;
+		savedNotes = [];
 	}
 
 	// ------------------------------------------------------------ HUD / forfeit

@@ -1501,8 +1501,11 @@ class PlayState extends MusicBeatState
 
 	override function draw() {
 		var e = scripts.event("draw", EventManager.get(DrawEvent).recycle());
-		if (!e.cancelled)
+		if (!e.cancelled) {
+			if (MultiplayerMatch.active) MultiplayerMatch.beforeDraw(this);
 			super.draw();
+			if (MultiplayerMatch.active) MultiplayerMatch.afterDraw();
+		}
 		scripts.event("postDraw", e);
 	}
 
