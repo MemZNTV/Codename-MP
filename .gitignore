@@ -1,0 +1,21 @@
+export/
+dump/
+latest/*
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+.haxelib/
+pages/
+docs/doc.xml
+mods/*
+addons/*
+!mods/readme.txt
+addons/*
+!addons/readme.txt
+dev-libs/
+*.sum
+.vs/
+
+# multiplayer server exe (rebuild with multiplayer-server/build-exe.bat)
+multiplayer-server/dist/
+multiplayer-server/sea-prep.blob
