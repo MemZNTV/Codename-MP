@@ -19,3 +19,6 @@ dev-libs/
 # multiplayer server exe (rebuild with multiplayer-server/build-exe.bat)
 multiplayer-server/dist/
 multiplayer-server/sea-prep.blob
+
+# upstream CI workflows are not included in this fork (pushing them needs a token with the "workflow" scope)
+.github/workflows/
