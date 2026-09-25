@@ -3,6 +3,7 @@ package funkin.multiplayer;
 import flixel.util.FlxSignal.FlxTypedSignal;
 import funkin.backend.assets.ModsFolder;
 import funkin.backend.chart.Chart;
+import funkin.backend.utils.NativeAPI;
 import haxe.Json;
 import haxe.Timer;
 import haxe.crypto.Md5;
@@ -11,6 +12,7 @@ import haxe.io.BytesOutput;
 import sys.net.Host;
 import sys.net.Socket;
 import sys.thread.Deque;
+import sys.thread.Mutex;
 import sys.thread.Thread;
 
 typedef MPPlayer = {
@@ -104,6 +106,14 @@ class MultiplayerClient {
 	var socket:Socket = null;
 	var queue:Deque<Dynamic> = new Deque<Dynamic>();
 	var gen:Int = 0; // bumped on every connect/disconnect so stale threads are ignored
+	// the main thread and the keep-alive thread both write, so whole lines go out one at a time
+	var writeLock:Mutex = new Mutex();
+	var lastSendMs:Float = 0;
+	/** True while the game is kept running in the background (see `updateBackgroundMode`). */
+	var backgroundMode:Bool = false;
+
+	/** Send a keep-alive from a background thread when nothing went out for this long (the server drops clients after 30s of silence). */
+	static inline final KEEPALIVE_MS:Float = 5000;
 
 	// clock sync
 	var serverOffset:Float = 0; // serverMs - localMs
@@ -115,6 +125,9 @@ class MultiplayerClient {
 
 	function new() {
 		FlxG.signals.preUpdate.add(pump);
+		// Nothing gets released while the window is in the background, so let go of every key when focus
+		// leaves (otherwise a key held while alt-tabbing stays held, like a sustain that never ends).
+		FlxG.signals.focusLost.add(function() if (backgroundMode) FlxG.keys.reset());
 	}
 
 	public static inline function nowMs():Float
@@ -156,13 +169,15 @@ class MultiplayerClient {
 					return;
 				}
 				socket = s;
-				s.output.writeString(Json.stringify(hello) + "\n");
+				writeLine(s, Json.stringify(hello));
 			} catch (e) {
 				try if (s != null) s.close() catch (_) {}
 				if (myGen == gen)
 					queue.add({gen: myGen, msg: {t: "_fail", msg: 'Could not connect to $host:$port.'}});
 				return;
 			}
+
+			startKeepAlive(s, myGen);
 
 			// blocking read loop; lines are assembled from raw bytes so nothing is lost or split
 			var buf = Bytes.alloc(4096);
@@ -211,9 +226,10 @@ class MultiplayerClient {
 
 	/** Sends a message. Returns false if we're not connected. */
 	public function send(obj:Dynamic):Bool {
-		if (socket == null || status == Disconnected) return false;
+		var s = socket;
+		if (s == null || status == Disconnected) return false;
 		try {
-			socket.output.writeString(Json.stringify(obj) + "\n");
+			writeLine(s, Json.stringify(obj));
 			return true;
 		} catch (e) {
 			queue.add({gen: gen, msg: {t: "_closed"}});
@@ -221,9 +237,41 @@ class MultiplayerClient {
 		}
 	}
 
+	/** Writes one line, never interleaved with another thread's line. Throws if the socket is dead. */
+	function writeLine(s:Socket, line:String):Void {
+		writeLock.acquire();
+		try {
+			s.output.writeString(line + "\n");
+			lastSendMs = nowMs();
+		} catch (e:Dynamic) {
+			writeLock.release();
+			throw e;
+		}
+		writeLock.release();
+	}
+
+	/**
+	 * Background thread that keeps the connection alive even when the game loop can't run for a while
+	 * (window being dragged, a long load, the game minimized on a slow PC). The main thread's regular
+	 * pings normally cover this, so it only speaks up after `KEEPALIVE_MS` of silence.
+	 * Its pings carry `c: -1` so their replies don't count as (delayed) round-trip measurements.
+	 */
+	function startKeepAlive(s:Socket, myGen:Int):Void {
+		Thread.create(function() {
+			while (myGen == gen) {
+				Sys.sleep(1);
+				if (myGen != gen) break;
+				if (nowMs() - lastSendMs < KEEPALIVE_MS) continue;
+				try writeLine(s, '{"t":"ping","c":-1}') catch (_:Dynamic) break;
+			}
+		});
+	}
+
 	// ------------------------------------------------------------ per-frame
 
 	function pump():Void {
+		updateBackgroundMode();
+
 		var item:Dynamic;
 		while ((item = queue.pop(false)) != null) {
 			if (item.gen != gen) continue;
@@ -238,6 +286,28 @@ class MultiplayerClient {
 				send({t: "ping", c: nowMs(), p: Math.round(rtt)});
 			}
 		}
+	}
+
+	/**
+	 * While connected (lobby list, lobby, match, results) the game keeps running when its window isn't
+	 * focused: no auto-pause, full framerate, no Windows background throttling, and the PC doesn't sleep.
+	 * Otherwise the other player would be left waiting on a frozen game, and the server would drop us for
+	 * going silent. Everything goes back to the player's settings once disconnected.
+	 */
+	function updateBackgroundMode():Void {
+		var want = status != Disconnected;
+		if (want) {
+			// re-applied every frame: the options menu or other code may set these back
+			FlxG.autoPause = false;
+			FlxG.game.focusLostFramerate = FlxG.drawFramerate;
+		}
+		if (want == backgroundMode) return;
+		backgroundMode = want;
+		if (!want) {
+			FlxG.autoPause = Options.autoPause;
+			FlxG.game.focusLostFramerate = 30;
+		}
+		try NativeAPI.setBackgroundKeepAlive(want) catch (_:Dynamic) {}
 	}
 
 	function process(m:Dynamic):Void {
@@ -274,6 +344,7 @@ class MultiplayerClient {
 	}
 
 	function onPong(sent:Float, serverTime:Float):Void {
+		if (sent < 0) return; // reply to a keep-alive ping (see startKeepAlive), not a measurement
 		var t = nowMs();
 		rtt = t - sent;
 		// Assume the reply took half the round trip; keep the sample with the smallest RTT (most accurate).

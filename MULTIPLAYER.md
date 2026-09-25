@@ -16,6 +16,10 @@ Everything works with any mod: both players load the same mod, and the song list
 
 During a match the pause menu is disabled (pausing would desync the two games). Press **Esc twice** to forfeit; the other player wins.
 
+While you're connected to a server (lobby list, lobby, match, results) the game **keeps running when its window isn't focused**: no auto-pause, full framerate, Windows' background throttling is turned off and the PC won't go to sleep. Your normal settings come back when you disconnect.
+
+The two songs are kept **semi-synced**: each game reports (on the shared server clock) when its song was at 0:00. If one falls more than 60 ms behind (a hitch during the countdown, audio that stalled), it skips ahead to where the other player is. Nobody is ever slowed down or pulled back.
+
 ## Requirements for both players
 
 - The **same mod** (same version). Both picked songs must exist for both players, because either one can win the roll. The lobby checks a fingerprint of each chart and tells you if yours differs.
@@ -32,9 +36,25 @@ Code: [source/funkin/multiplayer/](source/funkin/multiplayer/). The engine itsel
 `PlayState` (countdown handoff, remote hits/misses, no pause/death during matches), `StrumLine` (`remote` strumlines, key-change signal), `FreeplayState` (`goBack` hook) and `MainMenuState` (the menu entry).
 Scripts can react to the opponent's misses with `onDadMiss` / `onPostDadMiss` (their hits already trigger `onDadHit`).
 
-## Mods that hide arrows
+## The opponent's side is hidden
 
-Some mods hide one side's arrows (usually the left/opponent side). In a match that would hide the arrows of whoever plays that side, so the game moves the hiding to the **opponent's** side instead: if a mod hides the left arrows and you play left, your arrows stay visible and the right side is hidden; if you play right, the left side is hidden as the mod intended. This only changes what is drawn, so the mod's own scripts are unaffected. It catches arrows hidden through the strumline's visibility or by fading the strums/notes to zero alpha; other hiding tricks in a mod's scripts may not be covered.
+You only see your own arrows and notes. The other player's side is never drawn, but their hits and misses still happen underneath, so their character animates and the shared health bar moves as usual. If a mod hides your own side (some mods hide the left arrows), your side is shown anyway so you always have arrows to play. This only changes what is drawn, so the mod's own scripts are unaffected. Arrows hidden through the strumline's visibility or by fading the strums/notes to zero alpha are covered; other hiding tricks in a mod's scripts may not be.
+
+## Scripts talking to the other player
+
+A song or stage script can send a message to the same script on the other player's game:
+
+```haxe
+import funkin.multiplayer.MultiplayerMatch;
+
+if (MultiplayerMatch.active) MultiplayerMatch.sendScriptMessage("myThing", {score: 95});
+
+function onMultiplayerMessage(name, data) {
+	if (name == "myThing") trace(data.score);
+}
+```
+
+`MultiplayerMatch.mySide` is `"left"` or `"right"`. The data must be plain JSON, and the server relays at most 300 messages a second per player, so batch anything sent every frame. Mario's MP Madness uses this for No Party's drawing turns.
 
 ## Known limitations
 

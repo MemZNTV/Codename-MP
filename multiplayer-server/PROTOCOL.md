@@ -26,6 +26,9 @@ S -> C  {"t":"pong","c":<same client ms>,"s":<server ms>}
 Send one every ~2 seconds (the server drops silent clients after 30 s). With the round trip time `rtt = now - c`,
 the server clock is `s + rtt/2 - now` ahead of the client's; keep the sample with the smallest rtt.
 
+The game client also sends a keep-alive `{"t":"ping","c":-1}` from a background thread whenever it has sent nothing
+for 5 s (so a stalled game loop doesn't get it dropped). A negative `c` means "not a measurement": ignore its pong.
+
 ## Lobby list (while not inside a lobby)
 
 ```
@@ -87,7 +90,8 @@ Anything a client sends as `{"t":"g", ...}` is relayed unchanged to the other pl
 | `k` | key pressed or released | `l` lane, `p` 1 = down / 0 = up |
 | `h` | note hit | `l` lane, `m` note time (ms), `d` timing difference (ms) |
 | `m` | note missed | `l` lane, `m` note time or `null` (ghost tap), `su` 1 if a sustain piece |
-| `s` | live stats (4 per second) | `sc` score, `ms` misses, `ac` accuracy 0-1 (-1 = none yet), `cb` combo |
+| `s` | live stats (4 per second) | `sc` score, `ms` misses, `ac` accuracy 0-1 (-1 = none yet), `cb` combo, `z` sync anchor: server ms at which the sender's song was at 0:00 (`null` while it isn't playing) |
+| `x` | mod script message (`MultiplayerMatch.sendScriptMessage`) | `n` name, `d` any JSON; the receiver calls `onMultiplayerMessage(n, d)` on its PlayState scripts |
 
 At the end of the song each client reports its final numbers:
 

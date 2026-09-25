@@ -30,7 +30,8 @@ typedef MPStats = {
  *  - `k`: key pressed/released     `{l:lane, p:1|0}`
  *  - `h`: note hit                 `{l:lane, m:noteTime, d:timingDiffMs}`  (sustain pieces are inferred from the held key)
  *  - `m`: note missed              `{l:lane, m:noteTime|null, su:1|0}`      (`m:null` = ghost tap)
- *  - `s`: live stats               `{sc, ms, ac, cb}`
+ *  - `s`: live stats               `{sc, ms, ac, cb, z}`                   (`z`: song sync anchor, see `updateSync`)
+ *  - `x`: mod script message       `{n:name, d:data}`                      (see `sendScriptMessage`)
  */
 class MultiplayerMatch {
 	/** True from the moment the server tells us to load a song until the results screen is left. PlayState checks this. */
@@ -65,13 +66,27 @@ class MultiplayerMatch {
 	static var justReleased:Array<Bool> = [];
 	static var pending:Array<{msg:Dynamic, expire:Float}> = [];
 
-	static var oppText:FunkinText = null;
-	static var hintText:FunkinText = null;
+	/** The opponent's live stats text (on camHUD). Public so a mod's stage can move it out of the way. */
+	public static var oppText(default, null):FunkinText = null;
+	/** The "press again to forfeit" hint (on camHUD). */
+	public static var hintText(default, null):FunkinText = null;
 	static var hintTimer:Float = 0;
 	static var forfeitTimer:Float = 0;
 	static var pauseCooldown:Float = 0;
 
 	static inline final PENDING_TTL:Float = 2; // seconds an early/unmatched hit or miss waits for its note to appear
+
+	// ---- song sync (see updateSync)
+	/** Server-clock time (ms) at which our song was at 0:00. Null until our song is playing. */
+	static var myAnchor:Null<Float> = null;
+	/** The same for the other player, from their stats messages. */
+	static var oppAnchor:Null<Float> = null;
+	static var oppAnchorAt:Float = 0;
+	static var syncCooldown:Float = 0;
+	/** Drift the players are allowed before the one behind catches up. */
+	static inline final SYNC_TOLERANCE_MS:Float = 60;
+	/** Bigger drifts are ignored (something else is going on, like a song that paused on purpose). */
+	static inline final SYNC_MAX_MS:Float = 15000;
 
 	/** Hooks the global message handler. Safe to call many times. */
 	public static function init():Void {
@@ -96,6 +111,8 @@ class MultiplayerMatch {
 		justReleased = [];
 		oppText = hintText = null;
 		hintTimer = forfeitTimer = pauseCooldown = 0;
+		myAnchor = oppAnchor = null;
+		oppAnchorAt = syncCooldown = 0;
 		ps = null;
 		local = remote = null;
 		remoteIndex = -1;
@@ -236,13 +253,14 @@ class MultiplayerMatch {
 
 		processPending();
 		updateRemote(p);
+		updateSync(p, elapsed);
 
 		if (p.combo > maxCombo) maxCombo = p.combo;
 
 		statsTimer -= elapsed;
 		if (statsTimer <= 0 && p.startedCountdown) {
 			statsTimer = 0.25;
-			c.send({t: "g", k: "s", sc: p.songScore, ms: p.misses, ac: fin(p.accuracy), cb: p.combo});
+			c.send({t: "g", k: "s", sc: p.songScore, ms: p.misses, ac: fin(p.accuracy), cb: p.combo, z: myAnchor == null ? null : fin(myAnchor)});
 		}
 
 		updateHud(p, elapsed);
@@ -289,6 +307,16 @@ class MultiplayerMatch {
 		MultiplayerClient.instance.send({t: "g", k: "m", l: e.direction, m: n == null ? null : fin(n.strumTime), su: (n != null && n.isSustainNote) ? 1 : 0});
 	}
 
+	/**
+	 * Lets a mod script talk to the same script on the other player's game: the other side gets
+	 * `onMultiplayerMessage(name, data)` called on its PlayState scripts (song + stage).
+	 * `data` must be plain JSON (numbers, strings, arrays, anonymous objects). Does nothing outside a match.
+	 */
+	public static function sendScriptMessage(name:String, ?data:Dynamic):Void {
+		if (!active || ps == null) return;
+		MultiplayerClient.instance.send({t: "g", k: "x", n: name, d: data});
+	}
+
 	/** NaN/Infinity are not valid JSON. */
 	static inline function fin(f:Float):Float
 		return Math.isFinite(f) ? f : 0;
@@ -312,6 +340,13 @@ class MultiplayerMatch {
 				if (!apply(m)) pending.push({msg: m, expire: Timer.stamp() + PENDING_TTL});
 			case "s":
 				oppStats = {score: Std.int(m.sc), misses: Std.int(m.ms), accuracy: m.ac, combo: Std.int(m.cb)};
+				if (m.z == null) oppAnchor = null;
+				else {
+					oppAnchor = m.z;
+					oppAnchorAt = Timer.stamp();
+				}
+			case "x":
+				if (ps != null && ps.scripts != null && Std.isOfType(m.n, String)) ps.scripts.call("onMultiplayerMessage", [m.n, m.d]);
 		}
 	}
 
@@ -383,7 +418,56 @@ class MultiplayerMatch {
 		}
 	}
 
-	// ------------------------------------------------------------ hidden arrows
+	// ------------------------------------------------------------ song sync
+
+	/**
+	 * Keeps both players' songs roughly at the same spot ("semi synced").
+	 *
+	 * Each side measures its *anchor*: the server-clock time at which its song was at 0:00
+	 * (`serverNow - inst.time`). While both songs play normally the anchor stays constant, and since it's
+	 * on the shared server clock it doesn't depend on network lag, so the two anchors can be compared
+	 * directly. A later anchor means that song is behind (it started late after a hitch in the countdown,
+	 * or its audio stalled). Only the player who is behind acts: they skip ahead to where the other one
+	 * is. Nobody ever gets slowed down or pulled back, so there's no fighting between the two games.
+	 */
+	static function updateSync(p:PlayState, elapsed:Float):Void {
+		if (syncCooldown > 0) syncCooldown -= elapsed;
+
+		var inst = p.inst;
+		if (p.startingSong || finished || inst == null || !inst.playing) return;
+
+		var sample = MultiplayerClient.instance.serverNow() - inst.time;
+		if (myAnchor == null || Math.abs(sample - myAnchor) > 250) {
+			// first measurement, or our song jumped (a script seeked or paused it): start over and give the
+			// other player's reports a moment to catch up with the same jump before comparing
+			myAnchor = sample;
+			syncCooldown = 2;
+			return;
+		}
+		myAnchor += (sample - myAnchor) * Math.min(1, elapsed * 4); // smooths out frame-to-frame jitter
+
+		if (oppAnchor == null || syncCooldown > 0 || Timer.stamp() - oppAnchorAt > 2) return;
+		var behind = myAnchor - oppAnchor;
+		if (behind > SYNC_TOLERANCE_MS && behind < SYNC_MAX_MS) catchUp(p, behind);
+	}
+
+	/** Skips our song (music, every vocal track and the conductor) forward by `ms`. */
+	static function catchUp(p:PlayState, ms:Float):Void {
+		var t = p.inst.time + ms;
+		if (t >= p.inst.length - 500) return; // about to end anyway
+
+		p.inst.time = t;
+		if (p.vocals != null && p.vocals.playing) p.vocals.time = t;
+		for (sl in p.strumLines.members)
+			if (sl != null && sl.vocals != null && sl.vocals.playing) sl.vocals.time = t;
+		Conductor.songPosition = t;
+
+		myAnchor -= ms;
+		syncCooldown = 1.5; // let the new position settle before measuring again
+		Logs.verbose('[Multiplayer] behind the other player by ${Math.round(ms)}ms, caught up');
+	}
+
+	// ------------------------------------------------------------ hidden opponent side
 
 	static var swapped:Bool = false;
 	static var savedLocalVisible:Bool = true;
@@ -400,42 +484,47 @@ class MultiplayerMatch {
 	}
 
 	/**
-	 * Some mods hide one side's arrows (usually the left/opponent side). In a match that could be YOUR side,
-	 * leaving you with no arrows. So when the mod hides the local player's side but not the opponent's, we
-	 * show ours and hide the opponent's instead, only while drawing. The mod's scripts never see the change.
-	 * Called from `PlayState.draw`, before the frame is drawn.
+	 * The opponent's side (their arrows and notes) is never shown: you only see your own.
+	 * Their hits and misses still play out underneath, so their character and the shared health bar behave normally.
+	 * If a mod hides YOUR side (some hide the left one), it's shown anyway, otherwise you'd have no arrows to play.
+	 * This only changes what is drawn: the mod's scripts never see it.
+	 * Called from `PlayState.draw`, right before the frame is drawn.
 	 */
 	public static function beforeDraw(p:PlayState):Void {
 		swapped = false;
-		if (p != ps || local == null || remote == null) return;
-		if (!hiddenByMod(local) || hiddenByMod(remote)) return;
+		if (p != ps || remote == null) return;
 
 		swapped = true;
-		savedLocalVisible = local.visible;
 		savedRemoteVisible = remote.visible;
-		savedStrumAlpha = [for (s in local.members) s == null ? 1.0 : s.alpha];
-		savedNotes = [];
-
-		local.visible = true;
-		for (s in local.members) if (s != null && s.alpha < 0.05) s.alpha = 1;
-		local.notes.forEach(function(n:Note) {
-			savedNotes.push({note: n, alpha: n.alpha});
-			if (n.alpha < 0.05) n.alpha = n.isSustainNote ? 0.6 : 1; // sustains are drawn see-through
-		});
 		remote.visible = false;
+
+		savedNotes = [];
+		if (local != null && hiddenByMod(local)) {
+			savedLocalVisible = local.visible;
+			savedStrumAlpha = [for (s in local.members) s == null ? 1.0 : s.alpha];
+			local.visible = true;
+			for (s in local.members) if (s != null && s.alpha < 0.05) s.alpha = 1;
+			local.notes.forEach(function(n:Note) {
+				savedNotes.push({note: n, alpha: n.alpha});
+				if (n.alpha < 0.05) n.alpha = n.isSustainNote ? 0.6 : 1; // sustains are drawn see-through
+			});
+		} else {
+			savedStrumAlpha = [];
+		}
 	}
 
-	/** Puts everything `beforeDraw` touched back exactly as the mod had it. */
+	/** Puts everything `beforeDraw` touched back exactly as it was. */
 	public static function afterDraw():Void {
 		if (!swapped) return;
 		swapped = false;
-		if (local != null) {
+		if (remote != null) remote.visible = savedRemoteVisible;
+		if (local != null && savedStrumAlpha.length > 0) {
 			local.visible = savedLocalVisible;
 			for (i => s in local.members) if (s != null && i < savedStrumAlpha.length) s.alpha = savedStrumAlpha[i];
 		}
-		if (remote != null) remote.visible = savedRemoteVisible;
 		for (n in savedNotes) if (n.note != null && n.note.exists) n.note.alpha = n.alpha;
 		savedNotes = [];
+		savedStrumAlpha = [];
 	}
 
 	// ------------------------------------------------------------ HUD / forfeit
