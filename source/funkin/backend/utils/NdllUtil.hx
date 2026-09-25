@@ -36,6 +36,10 @@ final class NdllUtil {
 		var func:Dynamic = getFunctionFromPath(Paths.ndll('$ndll-$os'), name, args);
 
 		return Reflect.makeVarArgs(function(a:Array<Dynamic>) {
+			// Scripts can end up calling this with the call padded out to 5 `null`s (a `hideIcon()` with no arguments arrives as
+			// [null, null, null, null, null]), and a native function only accepts exactly the amount of arguments it was loaded with,
+			// so it would throw "Invalid Arg Count". Only pass on as many arguments as the function really takes.
+			if (a.length > args) a = a.slice(0, args);
 			// This generates horrific code
 			return funkin.backend.system.macros.Utils.generateReflectionLike(25, "func", "a");
 			//return Reflect.callMethod(null, func, a); // wouldn't work for some reason, maybe cause like c++ functions doesn't have reflection enabled

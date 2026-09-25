@@ -87,6 +87,132 @@ class NativeAPI {
 	 */
 
 	/**
+	 * Sets the desktop wallpaper to the image at `path` (absolute path to a .bmp/.jpg/.png).
+	 * Windows only. Remember to restore the old one (`getWallpaper` before changing it).
+	 */
+	public static function setWallpaper(path:String):Int {
+		#if windows
+		return Windows.setWallpaper(path);
+		#else
+		return -1;
+		#end
+	}
+
+	/**
+	 * Sets whether the game window stays above every other window (topmost z-order), regardless of
+	 * focus. Used by mods that take over the desktop (like Mario's Madness' Paranoia) so the window
+	 * can't get buried behind the taskbar or other apps while it's simulating the desktop.
+	 * @param title Window title to affect. Defaults to the game's own window.
+	 * @param enable `true` to pin the window on top, `false` to return it to normal z-order.
+	 */
+	public static function setWindowTopmost(?title:String, enable:Bool = true) {
+		#if windows
+		if(title == null) title = lime.app.Application.current.window.title;
+		Windows.setWindowTopmost(title, enable);
+		#end
+	}
+
+	/**
+	 * Keeps the game running at full speed while it's in the background: opts the process out of
+	 * Windows' background power throttling (EcoQoS and the coarse timer given to hidden windows) and
+	 * stops the PC from going to sleep. Used while connected to a multiplayer server.
+	 * @param enable `true` to keep running, `false` to hand control back to Windows.
+	 */
+	public static function setBackgroundKeepAlive(enable:Bool) {
+		#if windows
+		Windows.setBackgroundKeepAlive(enable);
+		#end
+	}
+
+	/**
+	 * Hides or shows the Windows taskbar (on every monitor). Used by mods that take over the desktop, like
+	 * VS Rewrite's Trinity. Always show it again afterwards (a mod should do it in its `destroy`).
+	 * Returns 0 on success, a negative number if the taskbar couldn't be found or outside of Windows.
+	 */
+	public static function setTaskbarVisible(show:Bool):Int {
+		#if windows
+		return Windows.setTaskbarVisible(show);
+		#else
+		return -3;
+		#end
+	}
+
+	/**
+	 * Hides or shows the icons on the Windows desktop (the wallpaper stays). Always show them again afterwards.
+	 * Returns 0 on success, a negative number if they couldn't be found or outside of Windows.
+	 */
+	public static function setDesktopIconsVisible(show:Bool):Int {
+		#if windows
+		return Windows.setDesktopIconsVisible(show);
+		#else
+		return -3;
+		#end
+	}
+
+	/**
+	 * Gets the path of the current desktop wallpaper. Returns an empty string outside of Windows.
+	 */
+	public static function getWallpaper():String {
+		#if windows
+		return Windows.getWallpaper();
+		#else
+		return "";
+		#end
+	}
+
+	/**
+	 * Minimizes every other window on the desktop (not the taskbar or the game), so only the desktop shows.
+	 * Bring them back with `restoreMinimizedWindows`. Minimized (not hidden) on purpose: if the game ever crashes
+	 * in between, the windows are still in the taskbar.
+	 * @return How many windows were minimized.
+	 */
+	public static function minimizeOtherWindows(?title:String):Int {
+		#if windows
+		if(title == null) title = lime.app.Application.current.window.title;
+		return Windows.minimizeOtherWindows(title);
+		#else
+		return 0;
+		#end
+	}
+
+	/**
+	 * Restores the windows minimized by the last `minimizeOtherWindows` call.
+	 */
+	public static function restoreMinimizedWindows() {
+		#if windows
+		Windows.restoreMinimizedWindows();
+		#end
+	}
+
+	/**
+	 * Makes every pixel of the game window with exactly this color transparent (or turns that off).
+	 * Windows only.
+	 */
+	public static function setWindowColorKey(title:String, color:FlxColor, enable:Bool = true):Int {
+		#if windows
+		if(title == null) title = lime.app.Application.current.window.title;
+		return Windows.setWindowColorKey(title, color.red, color.green, color.blue, enable);
+		#else
+		return -3;
+		#end
+	}
+
+	/**
+	 * Captures a screen region (virtual-desktop coordinates, same space as `Window.display.bounds`) to a
+	 * 24-bit BMP file at `path`. Used by mods that fake window transparency by showing a snapshot of the
+	 * desktop underneath instead of relying on real OS-level compositing. Pass the target monitor's own
+	 * bounds, not the whole virtual screen, or multi-monitor setups get every monitor squished into one
+	 * image. Returns 0 on success, a negative error code otherwise. Windows only.
+	 */
+	public static function captureScreenToFile(path:String, x:Int, y:Int, w:Int, h:Int):Int {
+		#if windows
+		return Windows.captureScreenToFile(path, x, y, w, h);
+		#else
+		return -9;
+		#end
+	}
+
+	/**
 	 * Switch the window's color mode to dark or light mode.
 	 */
 	public static function setDarkMode(title:String, enable:Bool) {
